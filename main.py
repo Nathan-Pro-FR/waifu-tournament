@@ -2,13 +2,43 @@ import os
 import discord
 from discord import app_commands
 from discord.ext import commands
+from aiohttp import web
 from dotenv import load_dotenv
 import database as db
 
 load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
 GUILD_ID = os.getenv("GUILD_ID")
+PORT = int(os.getenv("PORT", 10000))
 
+
+# --- MINI SERVEUR WEB POUR RENDER / UPTIMEROBOT ---
+
+async def handle_ping(request):
+    html_content = """
+    <!DOCTYPE html>
+    <html lang="fr">
+    <head><meta charset="UTF-8"><title>Waifu Tournament Bot</title></head>
+    <body style="font-family: sans-serif; text-align: center; margin-top: 50px;">
+        <h1>🟢 Bot Waifu Tournament en ligne</h1>
+        <p>Le bot Discord est actif et connecté à Supabase.</p>
+    </body>
+    </html>
+    """
+    return web.Response(text=html_content, content_type="text/html")
+
+
+async def start_web_server():
+    app = web.Application()
+    app.router.add_get("/", handle_ping)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", PORT)
+    await site.start()
+    print(f"Serveur web démarré sur le port {PORT}")
+
+
+# --- COMPOSANTS DISCORD ---
 
 class VoteView(discord.ui.View):
     def __init__(self, duel_id: int, w1: dict, w2: dict):
@@ -91,6 +121,7 @@ class WaifuBot(commands.Bot):
 
     async def setup_hook(self):
         db.init_db()
+        await start_web_server()
         if GUILD_ID:
             guild = discord.Object(id=int(GUILD_ID))
             self.tree.copy_global_to(guild=guild)
@@ -113,47 +144,51 @@ bot = WaifuBot()
 async def waifu_proposer(
     interaction: discord.Interaction, nom: str, oeuvre: str, image_url: str = None
 ):
+    await interaction.response.defer()
     added = db.add_waifu(nom, oeuvre, image_url, interaction.user.id)
     if added:
-        await interaction.response.send_message(
+        await interaction.followup.send(
             f"✨ **{nom}** (*{oeuvre}*) a été ajouté(e) à la liste des participantes !"
         )
     else:
-        await interaction.response.send_message(
+        await interaction.followup.send(
             f"⚠️ **{nom}** est déjà inscrit(e) dans la base de données.", ephemeral=True
         )
 
 
 @bot.tree.command(name="duel", description="Afficher le duel actuellement en cours")
 async def duel_cmd(interaction: discord.Interaction):
+    await interaction.response.defer()
     duel = db.get_active_duel()
     if not duel:
-        await interaction.response.send_message("Aucun duel n'est ouvert pour le moment.", ephemeral=True)
+        await interaction.followup.send("Aucun duel n'est ouvert pour le moment.", ephemeral=True)
         return
 
     embed = build_duel_embed(duel)
     view = VoteView(duel["id"], duel["waifu1"], duel["waifu2"])
-    await interaction.response.send_message(embed=embed, view=view)
+    await interaction.followup.send(embed=embed, view=view)
 
 
 @bot.tree.command(name="vote", description="Ouvrir les boutons de vote pour le duel actuel")
 async def vote_cmd(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
     duel = db.get_active_duel()
     if not duel:
-        await interaction.response.send_message("Aucun duel n'est ouvert pour le moment.", ephemeral=True)
+        await interaction.followup.send("Aucun duel n'est ouvert pour le moment.", ephemeral=True)
         return
 
     view = VoteView(duel["id"], duel["waifu1"], duel["waifu2"])
-    await interaction.response.send_message(
+    await interaction.followup.send(
         f"🗳️ Votez pour le **Duel #{duel['id']}** :", view=view, ephemeral=True
     )
 
 
 @bot.tree.command(name="classement", description="Afficher le classement des participantes")
 async def classement_cmd(interaction: discord.Interaction):
+    await interaction.response.defer()
     waifus = db.get_all_waifus()
     if not waifus:
-        await interaction.response.send_message("Aucune participante enregistrée pour le moment.", ephemeral=True)
+        await interaction.followup.send("Aucune participante enregistrée pour le moment.", ephemeral=True)
         return
 
     lines = []
@@ -166,7 +201,7 @@ async def classement_cmd(interaction: discord.Interaction):
         description="\n".join(lines),
         color=discord.Color.gold(),
     )
-    await interaction.response.send_message(embed=embed)
+    await interaction.followup.send(embed=embed)
 
 
 # --- COMMANDES DE MODÉRATION ---
@@ -184,9 +219,10 @@ async def waifu_autocomplete(interaction: discord.Interaction, current: str):
 @app_commands.default_permissions(manage_guild=True)
 @app_commands.autocomplete(waifu1=waifu_autocomplete, waifu2=waifu_autocomplete)
 async def duel_creer(interaction: discord.Interaction, waifu1: int, waifu2: int):
+    await interaction.response.defer()
     duel_id = db.create_duel(waifu1, waifu2)
     if not duel_id:
-        await interaction.response.send_message(
+        await interaction.followup.send(
             "❌ Impossible de créer le duel (choisissez deux personnages différents).",
             ephemeral=True,
         )
@@ -195,7 +231,7 @@ async def duel_creer(interaction: discord.Interaction, waifu1: int, waifu2: int)
     duel = db.get_active_duel()
     embed = build_duel_embed(duel)
     view = VoteView(duel["id"], duel["waifu1"], duel["waifu2"])
-    await interaction.response.send_message(
+    await interaction.followup.send(
         content="🚨 **Un nouveau duel vient de commencer !**", embed=embed, view=view
     )
 
@@ -203,18 +239,20 @@ async def duel_creer(interaction: discord.Interaction, waifu1: int, waifu2: int)
 @bot.tree.command(name="duel-ouvrir", description="[Modération] Réouvrir un duel existant via son ID")
 @app_commands.default_permissions(manage_guild=True)
 async def duel_ouvrir(interaction: discord.Interaction, duel_id: int):
+    await interaction.response.defer()
     if db.set_duel_status(duel_id, "open"):
-        await interaction.response.send_message(f"🔓 Le duel **#{duel_id}** est de nouveau ouvert aux votes.")
+        await interaction.followup.send(f"🔓 Le duel **#{duel_id}** est de nouveau ouvert aux votes.")
     else:
-        await interaction.response.send_message(f"❌ Duel **#{duel_id}** introuvable.", ephemeral=True)
+        await interaction.followup.send(f"❌ Duel **#{duel_id}** introuvable.", ephemeral=True)
 
 
 @bot.tree.command(name="duel-cloturer", description="[Modération] Clôturer le duel actuel et désigner la gagnante")
 @app_commands.default_permissions(manage_guild=True)
 async def duel_cloturer(interaction: discord.Interaction):
+    await interaction.response.defer()
     result = db.close_active_duel()
     if not result:
-        await interaction.response.send_message("Aucun duel ouvert à clôturer.", ephemeral=True)
+        await interaction.followup.send("Aucun duel ouvert à clôturer.", ephemeral=True)
         return
 
     w1, w2 = result["waifu1"], result["waifu2"]
@@ -227,7 +265,7 @@ async def duel_cloturer(interaction: discord.Interaction):
     else:
         verdict = f"🤝 **Égalité parfaite** ({v1} à {v2}) ! Aucun point attribué."
 
-    await interaction.response.send_message(f"🔒 **Duel #{result['id']} clôturé !**\n{verdict}")
+    await interaction.followup.send(f"🔒 **Duel #{result['id']} clôturé !**\n{verdict}")
 
 
 if __name__ == "__main__":
