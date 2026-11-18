@@ -1,593 +1,162 @@
-import os
-from datetime import datetime, timezone
+import sqlite3
+from typing import Optional, List, Tuple
 
-from dotenv import load_dotenv
-
-from sqlalchemy import (
-    create_engine,
-    String,
-    Integer,
-    DateTime,
-    ForeignKey,
-    UniqueConstraint,
-    CheckConstraint,
-    select,
-    func
-)
-
-from sqlalchemy.orm import (
-    DeclarativeBase,
-    Mapped,
-    mapped_column,
-    sessionmaker
-)
-
-load_dotenv()
-
-DATABASE_URL = os.getenv(
-    "DATABASE_URL",
-    "sqlite:///./waifu_tournament.db"
-)
-
-connect_args = (
-    {"check_same_thread": False}
-    if DATABASE_URL.startswith("sqlite")
-    else {}
-)
-
-engine = create_engine(
-    DATABASE_URL,
-    connect_args=connect_args,
-    pool_pre_ping=True
-)
-
-SessionLocal = sessionmaker(
-    bind=engine,
-    expire_on_commit=False
-)
+DB_NAME = "tournament.db"
 
 
-class Base(DeclarativeBase):
-    pass
-
-
-class Participant(Base):
-
-    __tablename__ = "participants"
-
-    id: Mapped[int] = mapped_column(
-        Integer,
-        primary_key=True
-    )
-
-    name: Mapped[str] = mapped_column(
-        String(100),
-        unique=True,
-        nullable=False
-    )
-
-    image_url: Mapped[str | None] = mapped_column(
-        String(500),
-        nullable=True
-    )
-
-    approved: Mapped[bool] = mapped_column(
-        default=False,
-        nullable=False
-    )
-
-    proposer_id: Mapped[str | None] = mapped_column(
-        String(100),
-        nullable=True
-    )
-
-    proposer_name: Mapped[str | None] = mapped_column(
-        String(150),
-        nullable=True
-    )
-
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        default=lambda: datetime.now(timezone.utc)
-    )
-
-
-class Duel(Base):
-
-    __tablename__ = "duels"
-
-    id: Mapped[int] = mapped_column(
-        Integer,
-        primary_key=True
-    )
-
-    participant_a_id: Mapped[int] = mapped_column(
-        ForeignKey("participants.id"),
-        nullable=False
-    )
-
-    participant_b_id: Mapped[int] = mapped_column(
-        ForeignKey("participants.id"),
-        nullable=False
-    )
-
-    status: Mapped[str] = mapped_column(
-        String(20),
-        default="draft",
-        nullable=False
-    )
-
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        default=lambda: datetime.now(timezone.utc)
-    )
-
-    opened_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True),
-        nullable=True
-    )
-
-    closed_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True),
-        nullable=True
-    )
-
-    __table_args__ = (
-        CheckConstraint(
-            "participant_a_id != participant_b_id"
-        ),
-        CheckConstraint(
-            "status IN ('draft', 'open', 'closed')"
-        )
-    )
-
-
-class Vote(Base):
-
-    __tablename__ = "votes"
-
-    id: Mapped[int] = mapped_column(
-        Integer,
-        primary_key=True
-    )
-
-    duel_id: Mapped[int] = mapped_column(
-        ForeignKey("duels.id", ondelete="CASCADE"),
-        nullable=False
-    )
-
-    participant_id: Mapped[int] = mapped_column(
-        ForeignKey("participants.id"),
-        nullable=False
-    )
-
-    user_id: Mapped[str] = mapped_column(
-        String(100),
-        nullable=False
-    )
-
-    username: Mapped[str] = mapped_column(
-        String(150),
-        nullable=False
-    )
-
-    source: Mapped[str] = mapped_column(
-        String(20),
-        default="site",
-        nullable=False
-    )
-
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        default=lambda: datetime.now(timezone.utc)
-    )
-
-    __table_args__ = (
-        UniqueConstraint(
-            "duel_id",
-            "user_id",
-            name="one_vote_per_user_per_duel"
-        ),
-    )
+def get_connection():
+    conn = sqlite3.connect(DB_NAME)
+    conn.row_factory = sqlite3.Row
+    return conn
 
 
 def init_db():
-    Base.metadata.create_all(engine)
-
-
-def participant_dict(p):
-    return {
-        "id": p.id,
-        "name": p.name,
-        "image_url": p.image_url,
-        "approved": p.approved
-    }
-
-
-def duel_dict(session, duel):
-
-    a = session.get(
-        Participant,
-        duel.participant_a_id
-    )
-
-    b = session.get(
-        Participant,
-        duel.participant_b_id
-    )
-
-    count = session.scalar(
-        select(func.count(Vote.id)).where(
-            Vote.duel_id == duel.id
-        )
-    ) or 0
-
-    return {
-        "id": duel.id,
-        "status": duel.status,
-        "participant_a": participant_dict(a),
-        "participant_b": participant_dict(b),
-        "vote_count": count,
-        "created_at": duel.created_at.isoformat(),
-        "opened_at": (
-            duel.opened_at.isoformat()
-            if duel.opened_at else None
-        ),
-        "closed_at": (
-            duel.closed_at.isoformat()
-            if duel.closed_at else None
-        )
-    }
-
-
-def list_participants(approved_only=True):
-
-    with SessionLocal() as session:
-
-        query = select(Participant)
-
-        if approved_only:
-            query = query.where(
-                Participant.approved.is_(True)
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        # Table des personnages (waifus)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS waifus (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT UNIQUE NOT NULL,
+                series TEXT NOT NULL,
+                image_url TEXT,
+                proposed_by INTEGER NOT NULL,
+                wins INTEGER DEFAULT 0
             )
-
-        query = query.order_by(Participant.name)
-
-        return [
-            participant_dict(p)
-            for p in session.scalars(query).all()
-        ]
-
-
-def propose_participant(
-    name,
-    image_url=None,
-    proposer_id=None,
-    proposer_name=None
-):
-
-    name = (name or "").strip()
-
-    if not name or len(name) > 100:
-        raise ValueError("Nom invalide.")
-
-    if image_url and (
-        not image_url.startswith("https://")
-        or len(image_url) > 500
-    ):
-        raise ValueError("URL d'image HTTPS invalide.")
-
-    with SessionLocal.begin() as session:
-
-        existing = session.scalar(
-            select(Participant).where(
-                func.lower(Participant.name) == name.lower()
+        """)
+        # Table des duels
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS duels (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                waifu1_id INTEGER NOT NULL,
+                waifu2_id INTEGER NOT NULL,
+                status TEXT DEFAULT 'open', -- 'open' ou 'closed'
+                winner_id INTEGER,
+                FOREIGN KEY (waifu1_id) REFERENCES waifus (id),
+                FOREIGN KEY (waifu2_id) REFERENCES waifus (id)
             )
-        )
-
-        if existing:
-            raise ValueError("Personnage déjà existant.")
-
-        p = Participant(
-            name=name,
-            image_url=image_url,
-            approved=False,
-            proposer_id=proposer_id,
-            proposer_name=proposer_name
-        )
-
-        session.add(p)
-        session.flush()
-
-        return participant_dict(p)
-
-
-def approve_participant(participant_id):
-
-    with SessionLocal.begin() as session:
-
-        p = session.get(Participant, participant_id)
-
-        if not p:
-            raise LookupError("Personnage introuvable.")
-
-        p.approved = True
-
-        return participant_dict(p)
-
-
-def get_or_create_approved(session, name):
-
-    name = (name or "").strip()
-
-    if not name or len(name) > 100:
-        raise ValueError("Nom invalide.")
-
-    p = session.scalar(
-        select(Participant).where(
-            func.lower(Participant.name) == name.lower()
-        )
-    )
-
-    if p:
-
-        if not p.approved:
-            raise ValueError(
-                f"{name} n'a pas encore été approuvé."
+        """)
+        # Table des votes
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS votes (
+                duel_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                waifu_id INTEGER NOT NULL,
+                PRIMARY KEY (duel_id, user_id),
+                FOREIGN KEY (duel_id) REFERENCES duels (id),
+                FOREIGN KEY (waifu_id) REFERENCES waifus (id)
             )
-
-        return p
-
-    p = Participant(
-        name=name,
-        approved=True
-    )
-
-    session.add(p)
-    session.flush()
-
-    return p
+        """)
+        conn.commit()
 
 
-def create_duel(name_a, name_b):
+def add_waifu(name: str, series: str, image_url: Optional[str], user_id: int) -> bool:
+    try:
+        with get_connection() as conn:
+            conn.execute(
+                "INSERT INTO waifus (name, series, image_url, proposed_by) VALUES (?, ?, ?, ?)",
+                (name.strip(), series.strip(), image_url, user_id),
+            )
+            conn.commit()
+        return True
+    except sqlite3.IntegrityError:
+        return False
 
-    if name_a.strip().lower() == name_b.strip().lower():
-        raise ValueError("Deux personnages différents sont requis.")
 
-    with SessionLocal.begin() as session:
+def get_all_waifus() -> List[sqlite3.Row]:
+    with get_connection() as conn:
+        return conn.execute("SELECT * FROM waifus ORDER BY wins DESC, name ASC").fetchall()
 
-        a = get_or_create_approved(session, name_a)
-        b = get_or_create_approved(session, name_b)
 
-        duel = Duel(
-            participant_a_id=a.id,
-            participant_b_id=b.id,
-            status="draft"
+def create_duel(waifu1_id: int, waifu2_id: int) -> Optional[int]:
+    if waifu1_id == waifu2_id:
+        return None
+    with get_connection() as conn:
+        # Ferme automatiquement tout autre duel ouvert pour éviter les conflits
+        conn.execute("UPDATE duels SET status = 'closed' WHERE status = 'open'")
+        cursor = conn.execute(
+            "INSERT INTO duels (waifu1_id, waifu2_id, status) VALUES (?, ?, 'open')",
+            (waifu1_id, waifu2_id),
         )
-
-        session.add(duel)
-        session.flush()
-
-        return duel_dict(session, duel)
+        conn.commit()
+        return cursor.lastrowid
 
 
-def get_duel(duel_id):
-
-    with SessionLocal() as session:
-
-        duel = session.get(Duel, duel_id)
-
-        return (
-            duel_dict(session, duel)
-            if duel else None
-        )
-
-
-def get_current_duel():
-
-    with SessionLocal() as session:
-
-        duel = session.scalar(
-            select(Duel)
-            .where(Duel.status == "open")
-            .order_by(Duel.opened_at.desc(), Duel.id.desc())
-        )
-
-        return (
-            duel_dict(session, duel)
-            if duel else None
-        )
-
-
-def list_open_duels():
-
-    with SessionLocal() as session:
-
-        duels = session.scalars(
-            select(Duel).where(Duel.status == "open")
-        ).all()
-
-        return [
-            duel_dict(session, duel)
-            for duel in duels
-        ]
-
-
-def set_duel_status(duel_id, status):
-
-    if status not in {"open", "closed"}:
-        raise ValueError("Statut invalide.")
-
-    with SessionLocal.begin() as session:
-
-        duel = session.get(Duel, duel_id)
-
+def get_active_duel() -> Optional[dict]:
+    with get_connection() as conn:
+        duel = conn.execute("SELECT * FROM duels WHERE status = 'open' ORDER BY id DESC LIMIT 1").fetchone()
         if not duel:
-            raise LookupError("Duel introuvable.")
+            return None
 
+        w1 = conn.execute("SELECT * FROM waifus WHERE id = ?", (duel["waifu1_id"],)).fetchone()
+        w2 = conn.execute("SELECT * FROM waifus WHERE id = ?", (duel["waifu2_id"],)).fetchone()
+
+        v1 = conn.execute(
+            "SELECT COUNT(*) FROM votes WHERE duel_id = ? AND waifu_id = ?", (duel["id"], w1["id"])
+        ).fetchone()[0]
+        v2 = conn.execute(
+            "SELECT COUNT(*) FROM votes WHERE duel_id = ? AND waifu_id = ?", (duel["id"], w2["id"])
+        ).fetchone()[0]
+
+        return {
+            "id": duel["id"],
+            "status": duel["status"],
+            "waifu1": dict(w1),
+            "waifu2": dict(w2),
+            "votes1": v1,
+            "votes2": v2,
+        }
+
+
+def set_duel_status(duel_id: int, status: str) -> bool:
+    with get_connection() as conn:
         if status == "open":
-
-            if duel.status == "closed":
-                raise ValueError(
-                    "Impossible de rouvrir un duel clôturé."
-                )
-
-            duel.status = "open"
-            duel.opened_at = datetime.now(timezone.utc)
-
-        else:
-
-            if duel.status != "open":
-                raise ValueError(
-                    "Le duel n'est pas ouvert."
-                )
-
-            duel.status = "closed"
-            duel.closed_at = datetime.now(timezone.utc)
-
-        session.flush()
-
-        return duel_dict(session, duel)
+            conn.execute("UPDATE duels SET status = 'closed' WHERE status = 'open'")
+        cursor = conn.execute("UPDATE duels SET status = ? WHERE id = ?", (status, duel_id))
+        conn.commit()
+        return cursor.rowcount > 0
 
 
-def cast_vote(
-    duel_id,
-    participant_id,
-    user_id,
-    username,
-    source="site"
-):
+def close_active_duel() -> Optional[dict]:
+    duel = get_active_duel()
+    if not duel:
+        return None
 
-    with SessionLocal.begin() as session:
+    w1, w2 = duel["waifu1"], duel["waifu2"]
+    v1, v2 = duel["votes1"], duel["votes2"]
 
-        duel = session.get(Duel, duel_id)
+    winner_id = None
+    if v1 > v2:
+        winner_id = w1["id"]
+    elif v2 > v1:
+        winner_id = w2["id"]
 
-        if not duel:
-            raise LookupError("Duel introuvable.")
-
-        if duel.status != "open":
-            raise ValueError("Les votes sont fermés.")
-
-        if participant_id not in {
-            duel.participant_a_id,
-            duel.participant_b_id
-        }:
-            raise ValueError("Participant absent du duel.")
-
-        participant = session.get(
-            Participant,
-            participant_id
+    with get_connection() as conn:
+        conn.execute(
+            "UPDATE duels SET status = 'closed', winner_id = ? WHERE id = ?",
+            (winner_id, duel["id"]),
         )
+        if winner_id:
+            conn.execute("UPDATE waifus SET wins = wins + 1 WHERE id = ?", (winner_id,))
+        conn.commit()
 
-        vote = session.scalar(
-            select(Vote).where(
-                Vote.duel_id == duel_id,
-                Vote.user_id == str(user_id)
-            )
+    duel["winner_id"] = winner_id
+    return duel
+
+
+def cast_vote(duel_id: int, user_id: int, waifu_id: int) -> bool:
+    with get_connection() as conn:
+        duel = conn.execute("SELECT status FROM duels WHERE id = ?", (duel_id,)).fetchone()
+        if not duel or duel["status"] != "open":
+            return False
+
+        conn.execute(
+            """
+            INSERT INTO votes (duel_id, user_id, waifu_id)
+            VALUES (?, ?, ?)
+            ON CONFLICT(duel_id, user_id) DO UPDATE SET waifu_id = excluded.waifu_id
+            """,
+            (duel_id, user_id, waifu_id),
         )
-
-        changed = (
-            vote is not None
-            and vote.participant_id != participant_id
-        )
-
-        if vote:
-
-            vote.participant_id = participant_id
-            vote.username = str(username)[:150]
-            vote.source = source
-            vote.updated_at = datetime.now(timezone.utc)
-
-        else:
-
-            vote = Vote(
-                duel_id=duel_id,
-                participant_id=participant_id,
-                user_id=str(user_id),
-                username=str(username)[:150],
-                source=source
-            )
-
-            session.add(vote)
-
-        session.flush()
-
-        count = session.scalar(
-            select(func.count(Vote.id)).where(
-                Vote.duel_id == duel_id
-            )
-        ) or 0
-
-        return {
-            "duel_id": duel_id,
-            "participant_id": participant_id,
-            "participant_name": participant.name,
-            "vote_count": count,
-            "changed": changed
-        }
-
-
-def get_leaderboard():
-
-    with SessionLocal() as session:
-
-        query = (
-            select(
-                Participant,
-                func.count(Vote.id).label("votes")
-            )
-            .outerjoin(
-                Vote,
-                Vote.participant_id == Participant.id
-            )
-            .where(Participant.approved.is_(True))
-            .group_by(Participant.id)
-            .order_by(
-                func.count(Vote.id).desc(),
-                Participant.name.asc()
-            )
-        )
-
-        return [
-            {
-                "id": p.id,
-                "name": p.name,
-                "votes": votes
-            }
-            for p, votes in session.execute(query).all()
-        ]
-
-
-def get_duel_results(duel_id):
-
-    with SessionLocal() as session:
-
-        duel = session.get(Duel, duel_id)
-
-        if not duel:
-            raise LookupError("Duel introuvable.")
-
-        query = (
-            select(
-                Vote.participant_id,
-                func.count(Vote.id)
-            )
-            .where(Vote.duel_id == duel_id)
-            .group_by(Vote.participant_id)
-        )
-
-        counts = dict(session.execute(query).all())
-
-        return {
-            "duel_id": duel_id,
-            "participant_a": participant_dict(
-                session.get(Participant, duel.participant_a_id)
-            ),
-            "participant_b": participant_dict(
-                session.get(Participant, duel.participant_b_id)
-            ),
-            "votes_a": counts.get(duel.participant_a_id, 0),
-            "votes_b": counts.get(duel.participant_b_id, 0),
-            "total": sum(counts.values()),
-            "status": duel.status
-        }
+        conn.commit()
+        return True
